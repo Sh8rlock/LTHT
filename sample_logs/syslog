@@ -1,0 +1,21 @@
+Jan 15 01:00:01 webserver01 systemd[1]: Started Daily apt download activities.
+Jan 15 01:00:01 webserver01 systemd[1]: Started Daily apt upgrade and clean activities.
+Jan 15 02:00:00 webserver01 systemd[1]: Started Rotate log files.
+Jan 15 02:13:00 webserver01 kernel: [ 8234.112233] TCP: Possible SYN flooding on port 22. Sending cookies.
+Jan 15 02:14:50 webserver01 systemd[1]: Started Session 45 of user deploy.
+Jan 15 03:22:25 webserver01 systemd[1]: Started Session 46 of user jsmith.
+Jan 15 04:11:05 webserver01 systemd[1]: Started Session 47 of user root.
+Jan 15 04:12:00 webserver01 kernel: [ 9876.445566] device eth0 entered promiscuous mode
+Jan 15 04:13:30 webserver01 kernel: [ 9966.778899] nf_conntrack: table full, dropping packet
+Jan 15 04:25:05 webserver01 systemd[1]: Stopped Uncomplicated firewall.
+Jan 15 04:25:06 webserver01 systemd[1]: Stopping Uncomplicated firewall.
+Jan 15 04:30:00 webserver01 systemd[1]: Started Unknown Service Unit - /tmp/.hidden_svc.
+Jan 15 04:30:01 webserver01 systemd[1]: Starting Unknown Service Unit - /tmp/.hidden_svc.
+Jan 15 05:00:00 webserver01 systemd[1]: Started Daily Cleanup of Temporary Directories.
+Jan 15 06:00:00 webserver01 kernel: [15432.998877] audit: type=1400 msg=audit(1705294800.123:456): apparmor="DENIED" operation="open" profile="/usr/sbin/sshd" name="/etc/shadow" pid=13500
+Jan 15 08:00:00 webserver01 systemd[1]: Started OpenBSD Secure Shell server.
+Jan 15 08:30:02 webserver01 systemd[1]: Started Session 50 of user sysadmin.
+Jan 15 10:00:00 webserver01 systemd[1]: Started System Logging Service.
+Jan 15 12:00:01 webserver01 systemd[1]: Started Session 51 of user sysadmin.
+Jan 15 14:00:00 webserver01 kernel: [44532.112233] Out of memory: Killed process 14500 (java) total-vm:2048000kB
+Jan 15 16:00:00 webserver01 systemd[1]: Started Daily man-db regeneration.
