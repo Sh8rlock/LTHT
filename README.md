@@ -16,4 +16,4 @@ cd LTHT
 python run_hunt.py --log-dir sample_logs/
 
 ## Author
-Larry Odeyemi — Cybersecurity & Cloud Infrastructure Engineer
+Larry Odeyemi
